@@ -1,6 +1,6 @@
 """TraceDesk AI — dark SRE operations console (Streamlit).
 
-Five functional areas, all backed by the FalkorDB knowledge graph:
+Six functional areas, all backed by the FalkorDB knowledge graph:
   1. Query Console    — natural-language investigation chat
   2. Incident Triage  — evidence-backed workspace for one incident
   3. Graph Explorer   — interactive topology with a node inspector
@@ -15,6 +15,7 @@ to ``db`` and ``query_graph``, and all reasoning to ``agent``.
 """
 
 import html
+import re
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -22,6 +23,7 @@ import streamlit.components.v1 as components
 import db
 import query_graph as q
 import seed_data
+import incident_writer as iw
 from agent import ask_agent, build_investigation
 from db import GraphUnavailableError
 
@@ -33,7 +35,7 @@ except ImportError:  # pragma: no cover - optional visual dependency
     PYVIS_AVAILABLE = False
 
 
-NAV_ITEMS = ["Query Console", "Incident Triage", "Graph Explorer", "Cypher Lab", "Runbooks"]
+NAV_ITEMS = ["Query Console", "Create Incident", "Incident Triage", "Graph Explorer", "Cypher Lab", "Runbooks"]
 
 ENTITY_COLORS = {
     "Service": "#00F0FF",
@@ -451,7 +453,7 @@ def render_sidebar(status):
         )
 
         st.markdown('<div class="td-label">Workspace</div>', unsafe_allow_html=True)
-        view = st.radio("Navigation", NAV_ITEMS, label_visibility="collapsed")
+        view = st.radio("Navigation", NAV_ITEMS, key="td_nav_view", label_visibility="collapsed")
 
         st.markdown('<div class="td-label">FalkorDB</div>', unsafe_allow_html=True)
         if status["connected"]:
@@ -681,6 +683,107 @@ def view_query_console(status):
             }
         )
         st.rerun()
+
+
+# --------------------------------------------------------------------------
+# View 2 — Create Incident
+# --------------------------------------------------------------------------
+def _next_incident_id(incidents):
+    """Suggest the next INC-NNN identifier without assuming IDs are contiguous."""
+    numbers = []
+    for incident in incidents or []:
+        match = re.fullmatch(r"INC-(\d+)", str(incident.get("id", "")), re.IGNORECASE)
+        if match:
+            numbers.append(int(match.group(1)))
+    return f"INC-{max(numbers, default=100) + 1:03d}"
+
+
+def view_create_incident(status):
+    st.markdown(
+        """
+        <div class="td-head">
+            <h1>Create Incident</h1>
+            <p>Record a new incident in FalkorDB and connect it to an existing service.
+            The new relationship makes the incident available to triage and graph navigation.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if not status["connected"]:
+        render_db_error(status["error"] or "Connection failed.")
+        return
+
+    services, error = run_query_safe(q.list_services)
+    if error:
+        render_db_error(error)
+        return
+    if not services:
+        st.warning("No services exist in the graph. Seed the demo graph first.")
+        return
+
+    incidents, incident_error = run_query_safe(q.list_incidents)
+    if incident_error:
+        render_db_error(incident_error)
+        return
+
+    service_names = sorted(s["name"] for s in services if s.get("name"))
+    suggested_id = _next_incident_id(incidents)
+
+    st.markdown("#### Incident details")
+    with st.form("td_create_incident_form", clear_on_submit=False):
+        id_col, severity_col, status_col = st.columns([1.2, 1, 1])
+        with id_col:
+            incident_id = st.text_input("Incident ID", value=suggested_id, help="Format: INC-106")
+        with severity_col:
+            severity = st.selectbox("Severity", ["Critical", "High", "Medium", "Low"], index=1)
+        with status_col:
+            incident_status = st.selectbox(
+                "Status", ["Investigating", "Monitoring", "Resolved"], index=0
+            )
+
+        title = st.text_input("Incident title", placeholder="e.g. Payment API request timeouts")
+        service_name = st.selectbox("Affected service", service_names)
+        description = st.text_area(
+            "Description",
+            placeholder="What happened? Include observable symptoms, errors, or impact.",
+            max_chars=2000,
+            height=120,
+        )
+        submitted = st.form_submit_button("Create incident in FalkorDB", use_container_width=True)
+
+    if submitted:
+        try:
+            created = iw.create_incident(
+                incident_id=incident_id,
+                title=title,
+                severity=severity,
+                status=incident_status,
+                service_name=service_name,
+                description=description,
+            )
+            st.session_state["td_created_incident"] = created
+        except iw.IncidentWriteError as error:
+            st.error(str(error))
+        except GraphUnavailableError as error:
+            render_db_error(str(error), context="Could not save incident")
+
+    created = st.session_state.get("td_created_incident")
+    if created:
+        st.success(f"Created {created['id']} and linked it to {created['service']}.")
+        st.markdown("#### Graph relationship created")
+        evidence_chain_line(
+            f"{h(created['id'])} -[AFFECTS]-> {h(created['service'])}"
+        )
+        st.info(
+            "Next: open **Incident Triage** to inspect owners, dependency impact, and recorded evidence, "
+            "or open **Graph Explorer** to inspect the new Incident node and its AFFECTS edge."
+        )
+        st.button(
+            "Open Incident Triage",
+            key="td_open_created_triage",
+            on_click=lambda: st.session_state.update({"td_nav_view": "Incident Triage"}),
+        )
 
 
 # --------------------------------------------------------------------------
@@ -1098,6 +1201,8 @@ def main():
 
     if view == "Query Console":
         view_query_console(status)
+    elif view == "Create Incident":
+        view_create_incident(status)
     elif view == "Incident Triage":
         view_incident_triage(status)
     elif view == "Graph Explorer":
