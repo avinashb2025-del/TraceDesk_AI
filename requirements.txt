@@ -1,0 +1,11 @@
+# TraceDesk AI runtime dependencies.
+# Versions reflect the environment the project was built and tested with.
+# `pandas`/`numpy` are intentionally not required by TraceDesk code; the UI
+# renders tables as HTML to keep the dependency surface small.
+
+streamlit>=1.40,<2.0
+falkordb>=1.1,<2.0
+pyvis>=0.3.2,<0.4
+
+# Testing
+pytest>=8.0,<10.0
